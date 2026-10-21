@@ -3,7 +3,7 @@
 """BERTopic-based patent topic modeling + weak-signal analysis.
 
 Input Excel default columns:
-  publication_number, application_year, abstract
+  publication_number, priority_date, title, abstract
 
 Outputs:
   patent_bertopic_results.xlsx
@@ -11,7 +11,7 @@ Outputs:
   topic_model/ (saved BERTopic model)
 
 Example:
-  python patent_bertopic.py --input patents.xlsx --text-column abstract --year-column application_year --id-column publication_number
+  python patent_bertopic.py --input patents.xlsx --title-column title --text-column abstract --priority-column priority_date --year-column application_year --id-column publication_number
 """
 from __future__ import annotations
 
@@ -70,6 +70,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="Patent BERTopic + weak-signal analysis")
     p.add_argument("--input", required=True, help="Input Excel (.xlsx)")
     p.add_argument("--sheet", default=0, help="Sheet name or zero-based index")
+    p.add_argument("--title-column", default="title")
     p.add_argument("--text-column", default="abstract")
     p.add_argument("--year-column", default="application_year")
     p.add_argument("--priority-column", default="priority_date")
@@ -106,32 +107,78 @@ def normalize_year(series: pd.Series) -> pd.Series:
 def load_data(args):
     sheet = int(args.sheet) if str(args.sheet).isdigit() else args.sheet
     df = pd.read_excel(args.input, sheet_name=sheet, engine="openpyxl")
-#    required = [args.text_column, args.year_column]
-    required = [args.text_column, args.priority_column]
+
+    # title, abstract, and priority_date are required input columns.
+    required = [args.title_column, args.text_column, args.priority_column]
     missing = [c for c in required if c not in df.columns]
     if missing:
-        raise ValueError(f"Missing required columns: {missing}. Available: {list(df.columns)}")
+        raise ValueError(
+            f"Missing required columns: {missing}. Available: {list(df.columns)}"
+        )
+
     if args.id_column not in df.columns:
         df[args.id_column] = np.arange(1, len(df) + 1).astype(str)
-    df[args.text_column] = df[args.text_column].fillna("").astype(str).str.strip()
-#    df[args.year_column] = normalize_year(df[args.year_column])
-#    df = df[(df[args.text_column] != "") & df[args.year_column].notna()].copy()
-#   "application_year" ではなく "priority_date" をmandatoryとする
-    df = df[(df[args.text_column] != "") & df[args.priority_column].notna()].copy()
 
-    df[args.year_column] = (
-        pd.to_datetime(
-            df["priority_date"],
-            errors="coerce"
-        )
-        .dt.year
-        .astype("Int64")
+    # Clean title and abstract while preserving the original columns for output.
+    df[args.title_column] = (
+        df[args.title_column]
+        .fillna("")
+        .astype(str)
+        .str.strip()
     )
-    
+    df[args.text_column] = (
+        df[args.text_column]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    # Combine title and abstract. Empty parts are omitted, so no unnecessary
+    # separator remains when only one of the two fields is available.
+    df["embedding_text"] = df.apply(
+        lambda row: ". ".join(
+            text
+            for text in [row[args.title_column], row[args.text_column]]
+            if text
+        ),
+        axis=1,
+    )
+
+    # Extract the analysis year from priority_date. Invalid values become <NA>
+    # and are removed below before conversion to the regular int dtype.
+    parsed_priority_date = pd.to_datetime(
+        df[args.priority_column],
+        errors="coerce",
+    )
+    df[args.year_column] = parsed_priority_date.dt.year.astype("Int64")
+
+    invalid_text_count = int(df["embedding_text"].eq("").sum())
+    invalid_date_count = int(df[args.year_column].isna().sum())
+
+    if invalid_text_count > 0:
+        print(
+            f"Warning: {invalid_text_count} records have neither title nor abstract."
+        )
+    if invalid_date_count > 0:
+        print(
+            f"Warning: {invalid_date_count} records have missing or invalid "
+            f"{args.priority_column}."
+        )
+
+    df = df[
+        (df["embedding_text"] != "")
+        & df[args.year_column].notna()
+    ].copy()
+
     df[args.year_column] = df[args.year_column].astype(int)
     df.reset_index(drop=True, inplace=True)
+
     if df.empty:
-        raise ValueError("No usable records remain after removing empty text / invalid years.")
+        raise ValueError(
+            "No usable records remain after removing empty title/abstract "
+            "or invalid priority dates."
+        )
+
     return df
 
 
@@ -379,7 +426,8 @@ def main():
     warnings.filterwarnings("ignore", category=FutureWarning)
 
     df = load_data(args)
-    docs = df[args.text_column].tolist()
+    # Use title + abstract as the common input to embedding and BERTopic.
+    docs = df["embedding_text"].tolist()
     print(f"Loaded {len(df):,} documents; years {df[args.year_column].min()}-{df[args.year_column].max()}")
 
     topic_model, embedding_model = build_model(args)
@@ -399,7 +447,16 @@ def main():
     topic_info = topic_model.get_topic_info()
     outliers = outlier_analysis(df, embeddings, topics, args.year_column)
     if not outliers.empty and "row_index" in outliers:
-        meta_cols = [c for c in [args.id_column, args.text_column] if c in df.columns]
+        meta_cols = [
+            c
+            for c in [
+                args.id_column,
+                args.title_column,
+                args.text_column,
+                "embedding_text",
+            ]
+            if c in df.columns
+        ]
         meta = df.reset_index().rename(columns={"index": "row_index"})[["row_index"] + meta_cols]
         outliers = outliers.merge(meta, on="row_index", how="left")
 
