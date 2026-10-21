@@ -29,6 +29,42 @@ import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import MinMaxScaler
 
+PATENT_STOP_WORDS = [
+    "invention",
+    "present",
+    "method",
+    "system",
+    "device",
+    "unit",
+    "apparatus",
+    "comprising",
+    "comprises",
+    "include",
+    "includes",
+    "including",
+    "provided",
+    "configured",
+    "first",
+    "second",
+    "plurality",
+    "embodiment",
+    "embodiments",
+    "disclosure",
+    "according",
+    "thereof",
+    "therein",
+    "wherein",
+    "said",
+
+    # ドローン母集団内で識別力が低い語
+    "drone",
+    "drones",
+    "uav",
+    "uavs",
+    "uas",
+    "unmanned",
+    "aerial",
+]
 
 def parse_args():
     p = argparse.ArgumentParser(description="Patent BERTopic + weak-signal analysis")
@@ -36,6 +72,7 @@ def parse_args():
     p.add_argument("--sheet", default=0, help="Sheet name or zero-based index")
     p.add_argument("--text-column", default="abstract")
     p.add_argument("--year-column", default="application_year")
+    p.add_argument("--priority-column", default="priority_date")
     p.add_argument("--id-column", default="publication_number")
     p.add_argument("--output", default="patent_bertopic_results.xlsx")
     p.add_argument("--model-dir", default="topic_model")
@@ -69,15 +106,28 @@ def normalize_year(series: pd.Series) -> pd.Series:
 def load_data(args):
     sheet = int(args.sheet) if str(args.sheet).isdigit() else args.sheet
     df = pd.read_excel(args.input, sheet_name=sheet, engine="openpyxl")
-    required = [args.text_column, args.year_column]
+#    required = [args.text_column, args.year_column]
+    required = [args.text_column, args.priority_column]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns: {missing}. Available: {list(df.columns)}")
     if args.id_column not in df.columns:
         df[args.id_column] = np.arange(1, len(df) + 1).astype(str)
     df[args.text_column] = df[args.text_column].fillna("").astype(str).str.strip()
-    df[args.year_column] = normalize_year(df[args.year_column])
-    df = df[(df[args.text_column] != "") & df[args.year_column].notna()].copy()
+#    df[args.year_column] = normalize_year(df[args.year_column])
+#    df = df[(df[args.text_column] != "") & df[args.year_column].notna()].copy()
+#   "application_year" ではなく "priority_date" をmandatoryとする
+    df = df[(df[args.text_column] != "") & df[args.priority_column].notna()].copy()
+
+    df[args.year_column] = (
+        pd.to_datetime(
+            df["priority_date"],
+            errors="coerce"
+        )
+        .dt.year
+        .astype("Int64")
+    )
+    
     df[args.year_column] = df[args.year_column].astype(int)
     df.reset_index(drop=True, inplace=True)
     if df.empty:
@@ -112,7 +162,18 @@ def build_model(args):
         cluster_selection_method="eom",
         prediction_data=True,
     )
-    vectorizer_model = CountVectorizer(stop_words="english" if args.language.lower() == "english" else None)
+
+    from sklearn.feature_extraction.text import (
+        CountVectorizer,
+        ENGLISH_STOP_WORDS
+    )
+
+    CUSTOM_STOP_WORDS = list(
+        set(ENGLISH_STOP_WORDS) | set(PATENT_STOP_WORDS)
+    )
+    
+#    vectorizer_model = CountVectorizer(stop_words="english" if args.language.lower() == "english" else None)
+    vectorizer_model = CountVectorizer(stop_words=CUSTOM_STOP_WORDS if args.language.lower() == "english" else None)    
     topic_model = BERTopic(
         embedding_model=embedding_model,
         umap_model=umap_model,
