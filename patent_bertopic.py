@@ -20,6 +20,7 @@ import json
 import math
 import os
 import random
+import re
 import sys
 import warnings
 from pathlib import Path
@@ -93,6 +94,27 @@ def parse_args():
     return p.parse_args()
 
 
+PUB_NUMBER_PATTERN = re.compile(r"\([A-Z]{2}[A-Z0-9/\-]*\d{4,}[A-Z0-9/\-]*\)")
+
+
+def clean_patent_field(text: str, deduplicate_lines: bool = False) -> str:
+    """Remove parenthesized publication numbers and optionally deduplicate lines."""
+    if not isinstance(text, str):
+        return ""
+    cleaned = PUB_NUMBER_PATTERN.sub("", text)
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if deduplicate_lines:
+        unique_lines = []
+        seen = set()
+        for line in lines:
+            key = line.rstrip(".").lower()
+            if key and key not in seen:
+                seen.add(key)
+                unique_lines.append(line)
+        lines = unique_lines
+    return ". ".join(lines) if deduplicate_lines else " ".join(lines)
+
+
 def normalize_year(series: pd.Series) -> pd.Series:
     # Accept years or date-like cells.
     numeric = pd.to_numeric(series, errors="coerce")
@@ -133,16 +155,19 @@ def load_data(args):
         .str.strip()
     )
 
-    # Combine title and abstract. Empty parts are omitted, so no unnecessary
-    # separator remains when only one of the two fields is available.
-    df["embedding_text"] = df.apply(
-        lambda row: ". ".join(
-            text
-            for text in [row[args.title_column], row[args.text_column]]
-            if text
-        ),
-        axis=1,
+    cleaned_title = df[args.title_column].apply(
+        lambda s: clean_patent_field(s, deduplicate_lines=True)
     )
+    cleaned_abstract = df[args.text_column].apply(
+        lambda s: clean_patent_field(s, deduplicate_lines=False)
+    )
+
+    # Combine cleaned title and abstract. Empty parts are omitted, so no
+    # unnecessary separator remains when only one of the two fields is available.
+    df["embedding_text"] = [
+        ". ".join(text for text in (t, a) if text)
+        for t, a in zip(cleaned_title, cleaned_abstract)
+    ]
 
     # Extract the analysis year from priority_date. Invalid values become <NA>
     # and are removed below before conversion to the regular int dtype.
@@ -424,6 +449,7 @@ def main():
     random.seed(args.seed)
     np.random.seed(args.seed)
     warnings.filterwarnings("ignore", category=FutureWarning)
+    warnings.filterwarnings("ignore", category=RuntimeWarning, module="sklearn.utils.extmath")
 
     df = load_data(args)
     # Use title + abstract as the common input to embedding and BERTopic.
@@ -433,6 +459,7 @@ def main():
     topic_model, embedding_model = build_model(args)
     print(f"Encoding with: {args.embedding_model}")
     embeddings = embedding_model.encode(docs, show_progress_bar=True, normalize_embeddings=True)
+    embeddings = np.asarray(embeddings, dtype=np.float64)
     print("Fitting BERTopic...")
     topics, _ = topic_model.fit_transform(docs, embeddings)
     df["topic"] = topics
