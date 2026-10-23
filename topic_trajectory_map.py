@@ -271,52 +271,218 @@ def make_interactive(df, year_col, output_html, low, high):
     )
     fig.write_html(output_html, include_plotlyjs=True, full_html=True)
 
-
-def make_animation(df, year_col, output_html, low, high):
+def make_animation(
+    df,
+    year_col,
+    output_html,
+    low,
+    high
+):
     try:
         import plotly.express as px
-    except ImportError as e:
-        raise RuntimeError("Plotly is required: pip install plotly") from e
 
-    d = df.copy()
-    d["bubble_size"] = np.clip(d["topic_count"], 1, None)
+    except ImportError as e:
+        raise RuntimeError(
+            "Plotly is required: "
+            "pip install plotly"
+        ) from e
+
+    # ========================================================
+    # Only topics actually present in each year
+    # ========================================================
+
+    d = df[
+        df["topic_count"] > 0
+    ].copy()
+
+    if d.empty:
+        raise ValueError(
+            "No active topic data available "
+            "for animation."
+        )
+
+    # Convert year explicitly to Python-compatible integer
+    d[year_col] = (
+        pd.to_numeric(
+            d[year_col],
+            errors="coerce"
+        )
+    )
+
+    d = d.dropna(
+        subset=[year_col]
+    )
+
+    d[year_col] = (
+        d[year_col]
+        .astype(int)
+    )
+
+    # Sort explicitly
+    d = d.sort_values(
+        [year_col, "topic"]
+    ).reset_index(drop=True)
+
+    # ========================================================
+    # Diagnostics
+    # ========================================================
+
+    animation_years = sorted(
+        d[year_col]
+        .unique()
+        .tolist()
+    )
+
+    print(
+        "Animation years:",
+        animation_years
+    )
+
+    print(
+        "Animation frame range:",
+        animation_years[0],
+        "-",
+        animation_years[-1]
+    )
+
+    print(
+        "Number of animation frames:",
+        len(animation_years)
+    )
+
+    # ========================================================
+    # Bubble size
+    # ========================================================
+
+    d["bubble_size"] = (
+        d["topic_count"]
+        .clip(lower=1)
+    )
+
+    # ========================================================
+    # Plot
+    # ========================================================
+
     fig = px.scatter(
         d,
+
         x="share",
         y="growth_plot",
+
         animation_frame=year_col,
         animation_group="topic",
+
         size="bubble_size",
+
         color="weak_signal_score",
+
         hover_name="topic_label",
+
         hover_data={
             "topic": True,
             year_col: True,
             "topic_count": True,
+
             "share": ":.4%",
+
             "rolling_growth": ":.3f",
+
             "weak_signal_score": ":.3f",
+
             "representative_words": True,
+
             "bubble_size": False,
             "growth_plot": False,
         },
+
         color_continuous_scale="Turbo",
+
         size_max=38,
-        range_x=[0, max(float(d["share"].max()) * 1.12, 0.001)],
-        range_y=[low, high],
-        title="Topic Trajectory Animation",
+
+        range_x=[
+            0,
+            max(
+                float(
+                    d["share"].max()
+                ) * 1.12,
+                0.001
+            )
+        ],
+
+        range_y=[
+            low,
+            high
+        ],
+
+        title=(
+            "Topic Trajectory Animation"
+        ),
+
         template="plotly_dark",
     )
-    fig.add_hline(y=0, line_dash="dash", line_color="#8799AA")
+
+    # ========================================================
+    # Reference line
+    # ========================================================
+
+    fig.add_hline(
+        y=0,
+        line_dash="dash",
+        line_color="#8799AA"
+    )
+
+    # ========================================================
+    # Layout
+    # ========================================================
+
     fig.update_layout(
-        xaxis_title="Topic share within each year",
-        yaxis_title="Rolling growth (log change)",
+
+        xaxis_title=(
+            "Topic share within each year"
+        ),
+
+        yaxis_title=(
+            "Rolling growth (log change)"
+        ),
+
         paper_bgcolor="#071A2E",
         plot_bgcolor="#071A2E",
+
         width=1250,
         height=800,
     )
-    fig.write_html(output_html, include_plotlyjs=True, full_html=True)
+
+    # ========================================================
+    # Animation speed
+    # ========================================================
+
+    if fig.layout.updatemenus:
+
+        buttons = (
+            fig.layout
+            .updatemenus[0]
+            .buttons
+        )
+
+        if buttons:
+
+            buttons[0].args[1][
+                "frame"
+            ]["duration"] = 700
+
+            buttons[0].args[1][
+                "transition"
+            ]["duration"] = 250
+
+    # ========================================================
+    # Save
+    # ========================================================
+
+    fig.write_html(
+        output_html,
+        include_plotlyjs=True,
+        full_html=True
+    )
 
 
 def make_static(df, year_col, output_png, label_top_n, low, high):
